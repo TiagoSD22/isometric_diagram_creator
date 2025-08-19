@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Isometric Architecture Diagram Renderer</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        .container {
+            display: flex;
+            gap: 20px;
+            height: 100vh;
+        }
+        
+        .editor-panel {
+            width: 400px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 20px;
+            overflow: hidden;
+        }
+        
+        .diagram-panel {
+            flex: 1;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 20px;
+            overflow: hidden;
+        }
+        
+        .dsl-editor {
+            width: 100%;
+            height: 400px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            resize: vertical;
+        }
+        
+        .controls {
+            margin-top: 15px;
+        }
+        
+        .btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        
+        .btn:hover {
+            background: #45a049;
+        }
+        
+        .btn.secondary {
+            background: #2196F3;
+        }
+        
+        .btn.secondary:hover {
+            background: #1976D2;
+        }
+        
+        .error {
+            color: #f44336;
+            margin-top: 10px;
+            padding: 10px;
+            background: #ffebee;
+            border-radius: 4px;
+            border-left: 4px solid #f44336;
+        }
+        
+        .svg-container {
+            width: 100%;
+            height: 600px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            overflow: hidden;
+            background: #fafafa;
+        }
+        
+        #diagram-svg {
+            width: 100%;
+            height: 100%;
+        }
+        
+        .component {
+            stroke: #333;
+            stroke-width: 2;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .component:hover {
+            stroke-width: 3;
+            filter: brightness(1.1);
+        }
+        
+        .container-box {
+            fill: rgba(33, 150, 243, 0.1);
+            stroke: #2196F3;
+            stroke-width: 2;
+            stroke-dasharray: 5,5;
+        }
+        
+        .relation-line {
+            stroke: #666;
+            stroke-width: 2;
+            marker-end: url(#arrowhead);
+        }
+        
+        .relation-label {
+            fill: #333;
+            font-size: 12px;
+            text-anchor: middle;
+            background: white;
+        }
+        
+        .component-label {
+            fill: #333;
+            font-size: 14px;
+            font-weight: bold;
+            text-anchor: middle;
+        }
+        
+        .editor-help {
+            margin-bottom: 10px;
+            color: #666;
+        }
+        
+        .editor-help kbd {
+            background: #f0f0f0;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-size: 11px;
+            border: 1px solid #ccc;
+        }
+        
+        .example-selector {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+            margin-right: 10px;
+            font-size: 14px;
+        }
+        
+        .example-selector:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+        
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="editor-panel">
+            <h2>DSL Editor</h2>
+            <div class="editor-help">
+                <small>Press <kbd>Ctrl+Enter</kbd> to render • <kbd>Ctrl+S</kbd> to export SVG</small>
+            </div>
+            <textarea class="dsl-editor" id="dsl-input" placeholder="Enter your architecture DSL here...">layout direction=LR ranksep=50 nodesep=30
+
+style user icon=👤 color=#4CAF50 image="user.png"
+style api icon=🔧 color=#2196F3
+style db icon=🗄️ color=#FF9800
+
+component user {
+  label "Application User"
+  type actor
+}
+
+container k8s_cluster {
+  label "Kubernetes Cluster"
+  
+  container pod {
+    label "API Pod"
+    
+    component python_api {
+      label "Python API"
+      type service
+    }
+  }
+  
+  container db_pod {
+    label "Database Pod"
+    
+    component postgres {
+      label "PostgreSQL"
+      type database
+    }
+  }
+}
+
+relation user -> python_api : "HTTP requests"
+relation python_api -> postgres : "SQL queries"
+
+annotation user {
+  tooltip "External users accessing the system"
+  link "https://docs.example.com/users"
+}</textarea>
+            
+            <div class="controls">
+                <button class="btn" onclick="parseAndRender()">Render Diagram</button>
+                <button class="btn secondary" onclick="exportSVG()">Export SVG</button>
+                <select onchange="loadExample(this.value)" class="example-selector">
+                    <option value="">Load Example...</option>
+                    <option value="simple-web-app">Simple Web App</option>
+                    <option value="microservices">Microservices</option>
+                    <option value="cloud-infrastructure">Cloud Infrastructure</option>
+                </select>
+                <input type="file" id="file-input" accept=".dsl,.txt" onchange="loadFile(this)" style="display: none;">
+                <button class="btn secondary" onclick="document.getElementById('file-input').click()">Load File</button>
+            </div>
+            
+            <div id="error-display"></div>
+        </div>
+        
+        <div class="diagram-panel">
+            <h2>Architecture Diagram</h2>
+            <div class="svg-container">
+                <svg id="diagram-svg">
+                    <defs>
+                        <marker id="arrowhead" markerWidth="10" markerHeight="7" 
+                                refX="9" refY="3.5" orient="auto">
+                            <polygon points="0 0, 10 3.5, 0 7" fill="#666" />
+                        </marker>
+                    </defs>
+                </svg>
+            </div>
+        </div>
+    </div>
+    
+    <div class="tooltip" id="tooltip" style="display: none;"></div>
+    
+    <script src="main.js"></script>
+</body>
+</html>
