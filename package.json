@@ -1,34 +1,30 @@
 {
   "name": "isometric-diagram-creator",
   "version": "1.0.0",
-  "description": "A web-based architecture diagram renderer with isometric projection",
-  "main": "index.html",
+  "description": "Web-based tool for creating interactive isometric architecture diagrams",
+  "main": "index.js",
+  "type": "module",
   "scripts": {
-    "build": "elm make src/Main.elm --output=elm.js --optimize",
-    "dev": "elm make src/Main.elm --output=elm.js --debug",
-    "serve": "npx serve .",
-    "start": "npm run serve"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "serve": "vite --host"
   },
   "keywords": [
-    "architecture",
-    "diagrams",
     "isometric",
-    "elm",
-    "d3js",
+    "architecture",
+    "diagram",
+    "three.js",
+    "dsl",
     "visualization"
   ],
-  "author": "Your Name",
-  "license": "MIT",
+  "dependencies": {
+    "three": "^0.158.0",
+    "three-addons": "^1.0.0"
+  },
   "devDependencies": {
-    "elm": "^0.19.1-6"
+    "vite": "^5.0.0"
   },
-  "dependencies": {},
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/yourusername/isometric-diagram-creator.git"
-  },
-  "bugs": {
-    "url": "https://github.com/yourusername/isometric-diagram-creator/issues"
-  },
-  "homepage": "https://github.com/yourusername/isometric-diagram-creator#readme"
+  "author": "",
+  "license": "MIT"
 }
