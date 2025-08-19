@@ -1,88 +1,78 @@
-// Microservices Architecture
-layout direction=TB ranksep=100 nodesep=60
+// Simple microservices architecture example
+layout direction=LR ranksep=80 nodesep=50
 
-style user icon=👤 color=#4CAF50
-style gateway icon=🚪 color=#2196F3
-style service icon=⚙️ color=#FF9800
-style database icon=🗄️ color=#9C27B0
-style cache icon=⚡ color=#F44336
-style queue icon=📨 color=#795548
+style user icon=👤 color=#4CAF50 shape=rectangle
+style api icon=⚙️ color=#2196F3 shape=pyramid
+style db icon=🗄️ color=#9C27B0 shape=cylinder
+style queue icon=📬 color=#FF9800 shape=cylinder
+style cache icon=⚡ color=#F44336 shape=rectangle
 
-component user {
-  label "Mobile App"
-  type client
+component frontend {
+  label "React Frontend"
+  type user
 }
 
-component api_gateway {
-  label "API Gateway"
-  type gateway
-}
-
-container microservices {
-  label "Microservices Cluster"
+container backend {
+  label "Microservices"
   
-  container user_service {
+  component auth_api {
+    label "Auth Service"
+    type api
+  }
+  
+  component user_api {
     label "User Service"
-    
-    component user_api {
-      label "User API"
-      type service
-    }
-    
-    component user_db {
-      label "User DB"
-      type database
-    }
+    type api
   }
   
-  container order_service {
+  component order_api {
     label "Order Service"
-    
-    component order_api {
-      label "Order API"
-      type service
-    }
-    
-    component order_db {
-      label "Order DB"
-      type database
-    }
+    type api
+  }
+}
+
+container data {
+  label "Data Layer"
+  
+  component user_db {
+    label "User DB"
+    type db
   }
   
-  container notification_service {
-    label "Notification Service"
-    
-    component notification_api {
-      label "Notification API"
-      type service
-    }
-    
-    component message_queue {
-      label "Message Queue"
-      type queue
-    }
+  component order_db {
+    label "Order DB"
+    type db
+  }
+  
+  component redis {
+    label "Redis Cache"
+    type cache
+  }
+  
+  component queue {
+    label "Message Queue"
+    type queue
   }
 }
 
-component redis_cache {
-  label "Redis Cache"
-  type cache
+relation frontend -> auth_api : "Login"
+relation frontend -> user_api : "Profile"
+relation frontend -> order_api : "Orders"
+relation auth_api -> user_db : "Validate"
+relation user_api -> user_db : "CRUD"
+relation user_api -> redis : "Cache"
+relation order_api -> order_db : "Store"
+relation order_api -> queue : "Events"
+
+annotation auth_api {
+  tooltip "JWT-based authentication service"
+  link "https://auth.example.com/docs"
 }
 
-relation user -> api_gateway : "HTTP/HTTPS"
-relation api_gateway -> user_api : "routes requests"
-relation api_gateway -> order_api : "routes requests"
-relation api_gateway -> notification_api : "routes requests"
-relation user_api -> user_db : "queries"
-relation order_api -> order_db : "queries"
-relation notification_api -> message_queue : "publishes"
-relation order_api -> redis_cache : "caches data"
-relation user_api -> redis_cache : "caches sessions"
-
-annotation microservices {
-  tooltip "Containerized microservices running on Kubernetes"
+annotation redis {
+  tooltip "Session and data caching layer"
 }
 
-annotation redis_cache {
-  tooltip "Shared cache for session data and frequently accessed information"
+annotation queue {
+  tooltip "Asynchronous event processing"
 }
