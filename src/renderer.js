@@ -21,6 +21,14 @@ export class IsometricRenderer {
         this.selectedObject = null;
         this.hoveredObject = null;
         
+        // Drag functionality
+        this.isDragging = false;
+        this.dragStartMouse = new THREE.Vector2();
+        this.dragStartPosition = new THREE.Vector3();
+        this.draggedObject = null;
+        this.dragPlane = new THREE.Plane();
+        this.dragOffset = new THREE.Vector3();
+        
         // Layout settings
         this.gridSize = 60;
         this.componentHeight = 20;
@@ -118,6 +126,8 @@ export class IsometricRenderer {
     setupEventListeners() {
         // Mouse events
         this.renderer.domElement.addEventListener('mousemove', this.onMouseMove.bind(this));
+        this.renderer.domElement.addEventListener('mousedown', this.onMouseDown.bind(this));
+        this.renderer.domElement.addEventListener('mouseup', this.onMouseUp.bind(this));
         this.renderer.domElement.addEventListener('click', this.onClick.bind(this));
         this.renderer.domElement.addEventListener('contextmenu', this.onContextMenu.bind(this));
         
@@ -126,38 +136,47 @@ export class IsometricRenderer {
         
         // Resize
         window.addEventListener('resize', this.onWindowResize.bind(this));
+        
+        // Prevent text selection during drag
+        this.renderer.domElement.addEventListener('selectstart', (e) => e.preventDefault());
     }
 
     /**
-     * Handle mouse movement for hover effects
+     * Handle mouse movement for hover effects and dragging
      */
     onMouseMove(event) {
         const rect = this.renderer.domElement.getBoundingClientRect();
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
+        // Handle dragging
+        if (this.isDragging && this.draggedObject) {
+            this.handleDrag(event);
+            return;
+        }
+
         this.raycaster.setFromCamera(this.mouse, this.camera);
         const intersects = this.raycaster.intersectObjects(this.scene.children, true);
 
         // Clear previous hover
-        if (this.hoveredObject) {
+        if (this.hoveredObject && !this.isDragging) {
             this.setObjectHighlight(this.hoveredObject, false);
             this.hoveredObject = null;
             this.container.style.cursor = 'default';
         }
 
-        // Set new hover
-        if (intersects.length > 0) {
-            const object = intersects[0].object;
-            if (object.userData.id) {
-                this.hoveredObject = object;
-                this.setObjectHighlight(object, true);
-                this.container.style.cursor = 'pointer';
+        // Set new hover - prioritize components over containers
+        if (intersects.length > 0 && !this.isDragging) {
+            const targetObject = this.findBestHoverTarget(intersects);
+            if (targetObject) {
+                this.hoveredObject = targetObject;
+                this.setObjectHighlight(targetObject, true);
+                this.container.style.cursor = 'grab';
                 
                 // Show tooltip if available
-                this.showTooltip(object, event);
+                this.showTooltip(targetObject, event);
             }
-        } else {
+        } else if (!this.isDragging) {
             this.hideTooltip();
         }
     }
@@ -166,6 +185,11 @@ export class IsometricRenderer {
      * Handle click events
      */
     onClick(event) {
+        // Prevent click if we just finished dragging
+        if (this.isDragging) {
+            return;
+        }
+
         this.raycaster.setFromCamera(this.mouse, this.camera);
         const intersects = this.raycaster.intersectObjects(this.scene.children, true);
 
@@ -188,6 +212,32 @@ export class IsometricRenderer {
             }
         } else {
             this.selectedObject = null;
+        }
+    }
+
+    /**
+     * Handle mouse down for drag start
+     */
+    onMouseDown(event) {
+        if (event.button !== 0) return; // Only left mouse button
+
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        const intersects = this.raycaster.intersectObjects(this.scene.children, true);
+
+        if (intersects.length > 0) {
+            const targetObject = this.findBestHoverTarget(intersects);
+            if (targetObject) {
+                this.startDrag(targetObject, intersects[0].point);
+            }
+        }
+    }
+
+    /**
+     * Handle mouse up for drag end
+     */
+    onMouseUp(event) {
+        if (this.isDragging) {
+            this.endDrag();
         }
     }
 
@@ -226,15 +276,550 @@ export class IsometricRenderer {
     }
 
     /**
-     * Set object highlight state
+     * Start dragging an object
+     */
+    startDrag(object, intersectionPoint) {
+        this.isDragging = true;
+        this.draggedObject = object;
+        this.container.style.cursor = 'grabbing';
+        
+        // Clear any existing hover highlight first
+        if (this.hoveredObject) {
+            this.setObjectHighlight(this.hoveredObject, false);
+            this.hoveredObject = null;
+        }
+        
+        // Store the initial position
+        this.dragStartPosition.copy(object.position);
+        
+        // Create a horizontal plane at the object's Y level for dragging
+        this.dragPlane.setFromNormalAndCoplanarPoint(
+            new THREE.Vector3(0, 1, 0), // Normal pointing up
+            object.position
+        );
+        
+        // Calculate offset from intersection point to object center
+        this.dragOffset.subVectors(object.position, intersectionPoint);
+    }
+
+    /**
+     * Handle dragging movement
+     */
+    handleDrag(event) {
+        if (!this.isDragging || !this.draggedObject) return;
+
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        
+        // Find intersection with the drag plane
+        const intersectionPoint = new THREE.Vector3();
+        if (this.raycaster.ray.intersectPlane(this.dragPlane, intersectionPoint)) {
+            // Apply the offset to maintain the initial grab point
+            intersectionPoint.add(this.dragOffset);
+            
+            // Calculate the movement delta
+            const delta = new THREE.Vector3().subVectors(intersectionPoint, this.draggedObject.position);
+            
+            // For components, check if they're being moved into/out of containers
+            if (this.draggedObject.userData.type === 'component') {
+                const newContainer = this.findContainerAtPosition(intersectionPoint);
+                // Only update parent if the container change is valid
+                if (this.isValidContainerAssignment(this.draggedObject.userData.id, newContainer)) {
+                    this.updateComponentParentContainer(this.draggedObject.userData.id, newContainer);
+                } else if (newContainer) {
+                    // Show rejection feedback if trying to move to invalid container
+                    const containerMesh = this.meshes.get(newContainer);
+                    if (containerMesh) {
+                        this.showContainerRejectionFeedback(containerMesh);
+                    }
+                }
+            }
+            
+            // Check boundary constraints for components inside containers
+            const finalPosition = this.applyBoundaryConstraints(this.draggedObject, intersectionPoint);
+            
+            // Calculate actual delta after constraints
+            const constrainedDelta = new THREE.Vector3().subVectors(finalPosition, this.draggedObject.position);
+            
+            // Update object position
+            this.draggedObject.position.copy(finalPosition);
+            
+            // If this is a container, move all its children
+            if (this.draggedObject.userData.type === 'container') {
+                this.moveContainerChildren(this.draggedObject.userData.id, constrainedDelta);
+            }
+            
+            // Update all connections that involve this object and its children
+            this.updateConnectionsForMovedObject(this.draggedObject.userData.id);
+        }
+    }
+
+    /**
+     * End dragging
+     */
+    endDrag() {
+        this.isDragging = false;
+        this.draggedObject = null;
+        this.container.style.cursor = 'default';
+    }
+
+    /**
+     * Find the best target for hover/drag from intersections
+     * Prioritizes components over containers for better UX
+     */
+    findBestHoverTarget(intersects) {
+        // First, try to find any component in the intersections
+        for (const intersect of intersects) {
+            const object = intersect.object;
+            if (object.userData.id && object.userData.type === 'component') {
+                return object;
+            }
+        }
+        
+        // If no component found, try to find a container
+        for (const intersect of intersects) {
+            const object = intersect.object;
+            if (object.userData.id && object.userData.type === 'container') {
+                return object;
+            }
+        }
+        
+        return null;
+    }
+
+    /**
+     * Find which container (if any) contains the given position
+     */
+    findContainerAtPosition(position) {
+        if (!this.currentDiagram) return null;
+        
+        // Check all containers to see if the position is within their bounds
+        for (const [containerId, containerData] of Object.entries(this.currentDiagram.containers)) {
+            const containerMesh = this.meshes.get(containerId);
+            if (containerMesh) {
+                const bounds = this.getContainerBounds(containerMesh);
+                
+                if (position.x >= bounds.minX && position.x <= bounds.maxX &&
+                    position.z >= bounds.minZ && position.z <= bounds.maxZ) {
+                    return containerId;
+                }
+            }
+        }
+        
+        return null; // Not inside any container
+    }
+
+    /**
+     * Check if a component can be assigned to a specific container
+     * This enforces business rules based on the original DSL structure
+     */
+    isValidContainerAssignment(componentId, newContainerId) {
+        if (!this.currentDiagram || !componentId) return false;
+        
+        // If no container (moving to top level), always allow
+        if (!newContainerId) return true;
+        
+        const component = this.currentDiagram.components[componentId];
+        const newContainer = this.currentDiagram.containers[newContainerId];
+        
+        if (!component || !newContainer) return false;
+        
+        // Get original DSL structure to enforce rules
+        // For now, we'll implement a simple validation based on component types and container purposes
+        // You can extend this with more sophisticated rules based on your DSL requirements
+        
+        // Example validation rules:
+        const componentType = component.properties.type;
+        const containerLabel = newContainer.properties.label?.toLowerCase() || '';
+        
+        // Basic validation: database components should go in data containers
+        if (componentType === 'db' && !containerLabel.includes('data')) {
+            return false;
+        }
+        
+        // API components should go in backend/service containers
+        if (componentType === 'api' && containerLabel.includes('data')) {
+            return false;
+        }
+        
+        // Cache components are flexible but prefer data containers
+        if (componentType === 'cache' && containerLabel.includes('backend') && containerLabel.includes('microservice')) {
+            return false;
+        }
+        
+        // Allow all other combinations for now
+        return true;
+    }
+
+    /**
+     * Show visual feedback when a component assignment is rejected
+     */
+    showContainerRejectionFeedback(containerMesh) {
+        if (containerMesh.material) {
+            const originalOpacity = containerMesh.material.opacity;
+            containerMesh.material.opacity = 0.3;
+            containerMesh.material.color.setHex(0xff4444); // Red tint for rejection
+            
+            // Reset after short delay
+            setTimeout(() => {
+                if (containerMesh.material) {
+                    containerMesh.material.opacity = originalOpacity;
+                    containerMesh.material.color.setHex(0xcccccc); // Back to normal
+                }
+            }, 500);
+        }
+    }
+
+    /**
+     * Update component's parent container relationship
+     */
+    updateComponentParentContainer(componentId, newContainerId) {
+        if (!this.currentDiagram) return;
+        
+        const component = this.currentDiagram.components[componentId];
+        if (!component) return;
+        
+        const oldContainerId = component.parent;
+        
+        // If parent hasn't changed, do nothing
+        if (oldContainerId === newContainerId) return;
+        
+        // Remove from old container's children list
+        if (oldContainerId && this.currentDiagram.containers[oldContainerId]) {
+            const oldContainer = this.currentDiagram.containers[oldContainerId];
+            if (oldContainer.children) {
+                oldContainer.children = oldContainer.children.filter(id => id !== componentId);
+            }
+        }
+        
+        // Add to new container's children list
+        if (newContainerId && this.currentDiagram.containers[newContainerId]) {
+            const newContainer = this.currentDiagram.containers[newContainerId];
+            if (!newContainer.children) {
+                newContainer.children = [];
+            }
+            if (!newContainer.children.includes(componentId)) {
+                newContainer.children.push(componentId);
+            }
+        }
+        
+        // Update component's parent reference
+        component.parent = newContainerId;
+        
+        // Provide visual feedback
+        if (newContainerId) {
+            const containerMesh = this.meshes.get(newContainerId);
+            if (containerMesh) {
+                this.showContainerAssignmentFeedback(containerMesh);
+            }
+        }
+    }
+
+    /**
+     * Show visual feedback when a component is assigned to a container
+     */
+    showContainerAssignmentFeedback(containerMesh) {
+        if (containerMesh.material) {
+            const originalOpacity = containerMesh.material.opacity;
+            containerMesh.material.opacity = 0.3;
+            containerMesh.material.color.setHex(0x66ff66); // Green tint for successful assignment
+            
+            // Reset after short delay
+            setTimeout(() => {
+                if (containerMesh.material) {
+                    containerMesh.material.opacity = originalOpacity;
+                    containerMesh.material.color.setHex(0xcccccc); // Back to normal
+                }
+            }, 300);
+        }
+    }
+
+    /**
+     * Apply boundary constraints to prevent objects from moving outside their containers
+     */
+    applyBoundaryConstraints(object, proposedPosition) {
+        const objectData = this.getObjectData(object.userData.id);
+        
+        // Only apply constraints if the object is currently inside a container
+        if (objectData && objectData.parent && object.userData.type === 'component') {
+            const parentMesh = this.meshes.get(objectData.parent);
+            if (parentMesh) {
+                const containerBounds = this.getContainerBounds(parentMesh);
+                const constrainedPosition = proposedPosition.clone();
+                
+                // Apply constraints based on container dimensions
+                const margin = 20; // Margin for visual separation
+                
+                // Check if the proposed position would take the component outside the container
+                const wouldExitContainer = 
+                    proposedPosition.x < containerBounds.minX + margin ||
+                    proposedPosition.x > containerBounds.maxX - margin ||
+                    proposedPosition.z < containerBounds.minZ + margin ||
+                    proposedPosition.z > containerBounds.maxZ - margin;
+                
+                if (wouldExitContainer) {
+                    // Calculate distance outside to determine if this is intentional exit
+                    const distanceOutside = Math.max(
+                        Math.max(containerBounds.minX + margin - proposedPosition.x, 0),
+                        Math.max(proposedPosition.x - (containerBounds.maxX - margin), 0),
+                        Math.max(containerBounds.minZ + margin - proposedPosition.z, 0),
+                        Math.max(proposedPosition.z - (containerBounds.maxZ - margin), 0)
+                    );
+                    
+                    if (distanceOutside > 40) { // If dragged significantly outside
+                        // Check if the new position would be in a valid container
+                        const newContainer = this.findContainerAtPosition(proposedPosition);
+                        if (newContainer && this.isValidContainerAssignment(object.userData.id, newContainer)) {
+                            // Allow movement to new valid container
+                            this.updateComponentParentContainer(object.userData.id, newContainer);
+                            return proposedPosition;
+                        } else {
+                            // Remove from container and allow free movement only if no container at target
+                            if (!newContainer) {
+                                this.updateComponentParentContainer(object.userData.id, null);
+                                return proposedPosition;
+                            } else {
+                                // Invalid container - constrain to current container
+                                this.showContainerRejectionFeedback(this.meshes.get(newContainer));
+                            }
+                        }
+                    }
+                    
+                    // Constrain to container boundaries
+                    constrainedPosition.x = Math.max(containerBounds.minX + margin, 
+                                                   Math.min(containerBounds.maxX - margin, proposedPosition.x));
+                    constrainedPosition.z = Math.max(containerBounds.minZ + margin, 
+                                                   Math.min(containerBounds.maxZ - margin, proposedPosition.z));
+                    
+                    // Visual feedback when constrained
+                    this.showBoundaryConstraintFeedback(parentMesh);
+                    return constrainedPosition;
+                }
+                
+                return proposedPosition;
+            }
+        }
+        
+        // No constraints for components not in containers or for containers themselves
+        return proposedPosition;
+    }
+
+    /**
+     * Get container bounds for boundary checking
+     */
+    getContainerBounds(containerMesh) {
+        // Use stored size information if available
+        const containerSize = containerMesh.userData.containerSize || {
+            width: this.gridSize * 1.8,
+            depth: this.gridSize * 1.2
+        };
+        
+        return {
+            minX: containerMesh.position.x - containerSize.width / 2,
+            maxX: containerMesh.position.x + containerSize.width / 2,
+            minZ: containerMesh.position.z - containerSize.depth / 2,
+            maxZ: containerMesh.position.z + containerSize.depth / 2
+        };
+    }
+
+    /**
+     * Show visual feedback when boundary constraint is applied
+     */
+    showBoundaryConstraintFeedback(containerMesh) {
+        // Temporarily highlight the container boundary
+        if (containerMesh.material) {
+            const originalOpacity = containerMesh.material.opacity;
+            containerMesh.material.opacity = 0.4;
+            containerMesh.material.color.setHex(0xff6666); // Reddish tint
+            
+            // Reset after short delay
+            setTimeout(() => {
+                if (containerMesh.material) {
+                    containerMesh.material.opacity = originalOpacity;
+                    containerMesh.material.color.setHex(0xcccccc); // Back to normal
+                }
+            }, 200);
+        }
+    }
+
+    /**
+     * Get object data from current diagram
+     */
+    getObjectData(objectId) {
+        if (!this.currentDiagram) return null;
+        
+        return this.currentDiagram.components[objectId] || this.currentDiagram.containers[objectId];
+    }
+
+    /**
+     * Move all children of a container when the container is moved
+     */
+    moveContainerChildren(containerId, delta) {
+        if (!this.currentDiagram || !this.currentDiagram.containers[containerId]) return;
+        
+        const container = this.currentDiagram.containers[containerId];
+        
+        // Move all direct children
+        if (container.children) {
+            container.children.forEach(childId => {
+                const childMesh = this.meshes.get(childId);
+                if (childMesh) {
+                    childMesh.position.add(delta);
+                    
+                    // If the child is also a container, recursively move its children
+                    if (childMesh.userData.type === 'container') {
+                        this.moveContainerChildren(childId, delta);
+                    }
+                }
+            });
+        }
+    }
+
+    /**
+     * Update connections for a moved object and all its children
+     */
+    updateConnectionsForMovedObject(objectId) {
+        // Update connections for the main object
+        this.updateConnections(objectId);
+        
+        // If it's a container, update connections for all children recursively
+        if (this.currentDiagram && this.currentDiagram.containers[objectId]) {
+            const container = this.currentDiagram.containers[objectId];
+            if (container.children) {
+                container.children.forEach(childId => {
+                    this.updateConnections(childId);
+                    
+                    // If child is also a container, recurse
+                    if (this.currentDiagram.containers[childId]) {
+                        this.updateConnectionsForMovedObject(childId);
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * Update connections for a moved object
+     */
+    updateConnections(objectId) {
+        // Remove old connections involving this object
+        const connectionsToRemove = this.connections.filter(connection => 
+            connection.userData.fromId === objectId || connection.userData.toId === objectId
+        );
+        
+        connectionsToRemove.forEach(connection => {
+            this.scene.remove(connection);
+            if (connection.geometry) connection.geometry.dispose();
+            if (connection.material) connection.material.dispose();
+        });
+        
+        // Remove from connections array
+        this.connections = this.connections.filter(connection => 
+            connection.userData.fromId !== objectId && connection.userData.toId !== objectId
+        );
+        
+        // Recreate connections involving this object
+        if (this.currentDiagram) {
+            for (const relation of this.currentDiagram.relations) {
+                if (relation.from === objectId || relation.to === objectId) {
+                    const fromMesh = this.meshes.get(relation.from);
+                    const toMesh = this.meshes.get(relation.to);
+                    
+                    if (fromMesh && toMesh) {
+                        const connection = this.createConnection(fromMesh, toMesh, relation.label);
+                        connection.userData.fromId = relation.from;
+                        connection.userData.toId = relation.to;
+                        this.scene.add(connection);
+                        this.connections.push(connection);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Set object highlight state with colored border
      */
     setObjectHighlight(object, highlighted) {
-        if (object.material) {
-            if (highlighted) {
-                object.material.emissive = new THREE.Color(0x333333);
-            } else {
-                object.material.emissive = new THREE.Color(0x000000);
+        if (highlighted) {
+            this.addHighlightBorder(object);
+        } else {
+            this.removeHighlightBorder(object);
+        }
+    }
+
+    /**
+     * Add colored border highlight to object
+     */
+    addHighlightBorder(object) {
+        // Remove existing highlight if any
+        this.removeHighlightBorder(object);
+        
+        let borderColor, borderWidth;
+        
+        if (object.userData.type === 'container') {
+            borderColor = 0x4CAF50; // Green for containers
+            borderWidth = 3;
+        } else {
+            borderColor = 0x2196F3; // Blue for components
+            borderWidth = 2;
+        }
+        
+        // Create border based on object type
+        let borderGeometry;
+        if (object.userData.type === 'container') {
+            // Use stored container size or default
+            const size = object.userData.containerSize || {
+                width: this.gridSize * 1.8,
+                height: this.containerHeight,
+                depth: this.gridSize * 1.2
+            };
+            borderGeometry = new THREE.BoxGeometry(
+                size.width + 4, 
+                size.height + 4, 
+                size.depth + 4
+            );
+        } else {
+            // Component border - slightly larger than the component
+            const box = new THREE.Box3().setFromObject(object);
+            const size = box.getSize(new THREE.Vector3());
+            borderGeometry = new THREE.BoxGeometry(
+                size.x + 4,
+                size.y + 4,
+                size.z + 4
+            );
+        }
+        
+        // Create wireframe border
+        const wireframe = new THREE.WireframeGeometry(borderGeometry);
+        const borderMaterial = new THREE.LineBasicMaterial({ 
+            color: borderColor,
+            linewidth: borderWidth,
+            transparent: true,
+            opacity: 0.8
+        });
+        
+        const border = new THREE.LineSegments(wireframe, borderMaterial);
+        border.position.copy(object.position);
+        border.name = 'highlightBorder';
+        
+        // Add border to scene
+        this.scene.add(border);
+        object.userData.highlightBorder = border;
+    }
+
+    /**
+     * Remove highlight border from object
+     */
+    removeHighlightBorder(object) {
+        if (object.userData.highlightBorder) {
+            this.scene.remove(object.userData.highlightBorder);
+            if (object.userData.highlightBorder.geometry) {
+                object.userData.highlightBorder.geometry.dispose();
             }
+            if (object.userData.highlightBorder.material) {
+                object.userData.highlightBorder.material.dispose();
+            }
+            delete object.userData.highlightBorder;
         }
     }
 
@@ -294,6 +879,9 @@ export class IsometricRenderer {
      * Render diagram from parsed model
      */
     render(diagram) {
+        // Store reference to current diagram for drag updates
+        this.currentDiagram = diagram;
+        
         // Clear existing objects
         this.clear();
 
@@ -317,7 +905,8 @@ export class IsometricRenderer {
         for (const [id, container] of Object.entries(diagram.containers)) {
             const position = layout.containers[id];
             if (position) {
-                const mesh = this.createContainerMesh(container, position);
+                const containerSize = position.containerSize;
+                const mesh = this.createContainerMesh(container, position, containerSize);
                 mesh.userData.id = id;
                 mesh.userData.type = 'container';
                 mesh.userData.annotation = diagram.annotations[id];
@@ -333,6 +922,8 @@ export class IsometricRenderer {
             
             if (fromMesh && toMesh) {
                 const connection = this.createConnection(fromMesh, toMesh, relation.label);
+                connection.userData.fromId = relation.from;
+                connection.userData.toId = relation.to;
                 this.scene.add(connection);
                 this.connections.push(connection);
             }
@@ -351,49 +942,111 @@ export class IsometricRenderer {
             containers: {}
         };
 
-        // Simple grid layout
+        // Simple grid layout with increased spacing
         let x = 0, z = 0;
-        const spacing = this.gridSize;
+        const spacing = this.gridSize * 1.5;
 
-        // Position components
+        // Position containers first and calculate their required sizes
+        for (const [id, container] of Object.entries(diagram.containers)) {
+            if (!container.parent) { // Only top-level containers
+                // Calculate required container size based on children
+                const containerInfo = this.calculateContainerLayout(id, container, diagram, spacing);
+                
+                layout.containers[id] = { x, y: 0, z };
+                
+                // Position children within container bounds
+                for (const [childId, childPos] of Object.entries(containerInfo.childPositions)) {
+                    if (diagram.components[childId]) {
+                        layout.components[childId] = {
+                            x: x + childPos.x,
+                            y: 5,
+                            z: z + childPos.z
+                        };
+                    } else if (diagram.containers[childId]) {
+                        layout.containers[childId] = {
+                            x: x + childPos.x,
+                            y: 5,
+                            z: z + childPos.z
+                        };
+                    }
+                }
+                
+                // Store container size for later use
+                layout.containers[id].containerSize = containerInfo.size;
+                
+                x += containerInfo.size.width + spacing;
+                if (x > spacing * 4) {
+                    x = 0;
+                    z += containerInfo.size.depth + spacing;
+                }
+            }
+        }
+
+        // Position components that don't belong to any container
         for (const [id, component] of Object.entries(diagram.components)) {
             if (!component.parent) { // Only top-level components
                 layout.components[id] = { x, y: 0, z };
                 x += spacing;
-                if (x > spacing * 4) {
+                if (x > spacing * 3) {
                     x = 0;
                     z += spacing;
                 }
             }
         }
 
-        // Position containers
-        for (const [id, container] of Object.entries(diagram.containers)) {
-            if (!container.parent) { // Only top-level containers
-                layout.containers[id] = { x, y: 0, z };
-                
-                // Position children within container
-                let childX = x - spacing;
-                let childZ = z - spacing / 2;
-                
-                for (const childId of container.children) {
-                    childX += spacing / 2;
-                    if (diagram.components[childId]) {
-                        layout.components[childId] = { x: childX, y: 5, z: childZ };
-                    } else if (diagram.containers[childId]) {
-                        layout.containers[childId] = { x: childX, y: 5, z: childZ };
-                    }
-                }
-                
-                x += spacing * 2;
-                if (x > spacing * 4) {
-                    x = 0;
-                    z += spacing * 2;
-                }
-            }
-        }
-
         return layout;
+    }
+
+    /**
+     * Calculate optimal layout for a container and its children
+     */
+    calculateContainerLayout(containerId, container, diagram, spacing) {
+        const children = container.children || [];
+        const componentSpacing = spacing * 0.5;
+        const margin = 30; // Margin inside container
+        
+        // Arrange children in a grid within the container
+        let childX = -componentSpacing;
+        let childZ = 0;
+        let maxX = 0;
+        let maxZ = 0;
+        let currentRowHeight = 0;
+        
+        const childPositions = {};
+        const itemsPerRow = Math.max(2, Math.ceil(Math.sqrt(children.length)));
+        
+        for (let i = 0; i < children.length; i++) {
+            const childId = children[i];
+            
+            if (i % itemsPerRow === 0 && i > 0) {
+                // Move to next row
+                childX = -componentSpacing;
+                childZ += currentRowHeight + componentSpacing;
+                currentRowHeight = 0;
+            } else if (i > 0) {
+                childX += componentSpacing;
+            }
+            
+            childPositions[childId] = { x: childX, z: childZ };
+            
+            // Track dimensions for container sizing
+            maxX = Math.max(maxX, Math.abs(childX));
+            maxZ = Math.max(maxZ, Math.abs(childZ));
+            currentRowHeight = Math.max(currentRowHeight, componentSpacing * 0.8);
+        }
+        
+        // Calculate container size with margins
+        const containerWidth = Math.max(this.gridSize * 1.8, (maxX * 2) + margin * 2 + componentSpacing);
+        const containerDepth = Math.max(this.gridSize * 1.2, maxZ + currentRowHeight + margin * 2);
+        
+        return {
+            childPositions,
+            size: {
+                width: containerWidth,
+                height: this.containerHeight,
+                depth: containerDepth
+            }
+        };
     }
 
     /**
@@ -431,7 +1084,7 @@ export class IsometricRenderer {
 
         // Add label
         if (component.properties.label) {
-            const label = this.createTextLabel(component.properties.label);
+            const label = this.createTextLabel(component.properties.label, 1, false); // Enhanced component label
             label.position.y = this.componentHeight + 5;
             mesh.add(label);
         }
@@ -449,32 +1102,54 @@ export class IsometricRenderer {
     /**
      * Create 3D mesh for container
      */
-    createContainerMesh(container, position) {
+    createContainerMesh(container, position, containerSize = null) {
+        // Use calculated size or default
+        const containerWidth = containerSize ? containerSize.width : this.gridSize * 1.8;
+        const containerDepth = containerSize ? containerSize.depth : this.gridSize * 1.2;
+        
         const geometry = new THREE.BoxGeometry(
-            this.gridSize * 1.8, 
+            containerWidth, 
             this.containerHeight, 
-            this.gridSize * 1.2
+            containerDepth
         );
         
         const material = new THREE.MeshLambertMaterial({ 
             color: 0xcccccc,
             transparent: true,
-            opacity: 0.3,
-            wireframe: false
+            opacity: 0.1, // Much more transparent
+            wireframe: false,
+            depthWrite: false // Don't write to depth buffer to avoid blocking
         });
 
         const mesh = new THREE.Mesh(geometry, material);
         mesh.position.set(position.x, position.y + this.containerHeight/2, position.z);
         mesh.receiveShadow = true;
 
-        // Add wireframe outline
-        const wireframe = new THREE.WireframeGeometry(geometry);
-        const line = new THREE.LineSegments(wireframe, new THREE.LineBasicMaterial({ color: 0x888888 }));
-        mesh.add(line);
+        // Store size information for boundary calculations
+        mesh.userData.containerSize = {
+            width: containerWidth,
+            height: this.containerHeight,
+            depth: containerDepth
+        };
 
-        // Add label
+        // Remove wireframe outline for cleaner look
+        // const wireframe = new THREE.WireframeGeometry(geometry);
+        // const line = new THREE.LineSegments(wireframe, new THREE.LineBasicMaterial({ color: 0x888888 }));
+        // mesh.add(line);
+
+        // Add subtle outline only at the bottom edge
+        const edges = new THREE.EdgesGeometry(geometry);
+        const edgeMaterial = new THREE.LineBasicMaterial({ 
+            color: 0x999999, 
+            transparent: true, 
+            opacity: 0.3 
+        });
+        const edgeLines = new THREE.LineSegments(edges, edgeMaterial);
+        mesh.add(edgeLines);
+
+        // Add label with enhanced styling
         if (container.properties.label) {
-            const label = this.createTextLabel(container.properties.label);
+            const label = this.createTextLabel(container.properties.label, 1, true); // Enhanced label
             label.position.y = this.containerHeight + 5;
             mesh.add(label);
         }
@@ -508,7 +1183,7 @@ export class IsometricRenderer {
 
         // Add label if provided
         if (label) {
-            const labelSprite = this.createTextLabel(label, 0.5);
+            const labelSprite = this.createTextLabel(label, 0.5, false); // Enhanced connection label
             const midPoint = new THREE.Vector3().addVectors(fromPos, toPos).multiplyScalar(0.5);
             labelSprite.position.copy(midPoint);
             labelSprite.position.y += 10;
@@ -519,29 +1194,75 @@ export class IsometricRenderer {
     }
 
     /**
-     * Create text label sprite
+     * Create text label sprite with enhanced styling
      */
-    createTextLabel(text, scale = 1) {
+    createTextLabel(text, scale = 1, isContainer = false) {
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
-        const fontSize = 32;
+        const fontSize = isContainer ? 28 : 32;
         
-        canvas.width = 256;
-        canvas.height = 64;
+        canvas.width = 320;
+        canvas.height = isContainer ? 80 : 64;
         
-        context.fillStyle = 'rgba(255, 255, 255, 0.8)';
-        context.fillRect(0, 0, canvas.width, canvas.height);
+        // Enhanced background with gradient and border
+        if (isContainer) {
+            // Container labels get a more prominent style
+            const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, 'rgba(100, 150, 200, 0.9)');
+            gradient.addColorStop(1, 'rgba(70, 120, 170, 0.9)');
+            context.fillStyle = gradient;
+        } else {
+            // Component labels get a subtle style
+            context.fillStyle = 'rgba(255, 255, 255, 0.95)';
+        }
         
-        context.fillStyle = '#333333';
-        context.font = `${fontSize}px Arial`;
+        // Rounded rectangle background
+        const borderRadius = 8;
+        const x = 4;
+        const y = 4;
+        const width = canvas.width - 8;
+        const height = canvas.height - 8;
+        
+        context.beginPath();
+        context.moveTo(x + borderRadius, y);
+        context.lineTo(x + width - borderRadius, y);
+        context.quadraticCurveTo(x + width, y, x + width, y + borderRadius);
+        context.lineTo(x + width, y + height - borderRadius);
+        context.quadraticCurveTo(x + width, y + height, x + width - borderRadius, y + height);
+        context.lineTo(x + borderRadius, y + height);
+        context.quadraticCurveTo(x, y + height, x, y + height - borderRadius);
+        context.lineTo(x, y + borderRadius);
+        context.quadraticCurveTo(x, y, x + borderRadius, y);
+        context.closePath();
+        context.fill();
+        
+        // Add border
+        context.strokeStyle = isContainer ? 'rgba(255, 255, 255, 0.8)' : 'rgba(200, 200, 200, 0.8)';
+        context.lineWidth = 2;
+        context.stroke();
+        
+        // Text with shadow for better readability
+        context.font = `bold ${fontSize}px Arial, sans-serif`;
         context.textAlign = 'center';
         context.textBaseline = 'middle';
+        
+        // Text shadow
+        context.fillStyle = 'rgba(0, 0, 0, 0.3)';
+        context.fillText(text, canvas.width / 2 + 1, canvas.height / 2 + 1);
+        
+        // Main text
+        context.fillStyle = isContainer ? '#ffffff' : '#333333';
         context.fillText(text, canvas.width / 2, canvas.height / 2);
 
         const texture = new THREE.CanvasTexture(canvas);
-        const material = new THREE.SpriteMaterial({ map: texture });
+        texture.needsUpdate = true;
+        const material = new THREE.SpriteMaterial({ 
+            map: texture,
+            transparent: true,
+            alphaTest: 0.1
+        });
         const sprite = new THREE.Sprite(material);
-        sprite.scale.set(20 * scale, 10 * scale, 1);
+        sprite.scale.set(25 * scale, (isContainer ? 12 : 10) * scale, 1);
 
         return sprite;
     }
@@ -600,8 +1321,11 @@ export class IsometricRenderer {
      * Clear all rendered objects
      */
     clear() {
-        // Remove meshes
+        // Remove meshes and their highlight borders
         for (const mesh of this.meshes.values()) {
+            // Remove highlight border if exists
+            this.removeHighlightBorder(mesh);
+            
             this.scene.remove(mesh);
             if (mesh.geometry) mesh.geometry.dispose();
             if (mesh.material) mesh.material.dispose();
@@ -618,6 +1342,8 @@ export class IsometricRenderer {
 
         this.selectedObject = null;
         this.hoveredObject = null;
+        this.draggedObject = null;
+        this.isDragging = false;
     }
 
     /**
