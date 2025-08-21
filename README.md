@@ -2,6 +2,9 @@
 
 A web-based tool for creating interactive, isometric architecture diagrams using a custom Domain Specific Language (DSL) and Three.js rendering.
 
+<img width="2002" height="958" alt="image" src="https://github.com/user-attachments/assets/90c7e966-5597-4de5-9d35-982a9d713dbd" />
+
+
 ## ✨ Features
 
 - **Custom DSL**: Intuitive syntax for describing architecture components, containers, and relationships
