@@ -29,6 +29,12 @@ export class IsometricRenderer {
         this.dragPlane = new THREE.Plane();
         this.dragOffset = new THREE.Vector3();
         
+        // Camera panning
+        this.isPanning = false;
+        this.panStartMouse = new THREE.Vector2();
+        this.panStartCameraPosition = new THREE.Vector3();
+        this.lastMousePosition = new THREE.Vector2();
+        
         // Layout settings
         this.gridSize = 60;
         this.componentHeight = 20;
@@ -134,6 +140,9 @@ export class IsometricRenderer {
         // Wheel for zoom
         this.renderer.domElement.addEventListener('wheel', this.onWheel.bind(this));
         
+        // Keyboard events
+        document.addEventListener('keydown', this.onKeyDown.bind(this));
+        
         // Resize
         window.addEventListener('resize', this.onWindowResize.bind(this));
         
@@ -149,7 +158,13 @@ export class IsometricRenderer {
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
-        // Handle dragging
+        // Handle camera panning
+        if (this.isPanning) {
+            this.handleCameraPan(event);
+            return;
+        }
+
+        // Handle object dragging
         if (this.isDragging && this.draggedObject) {
             this.handleDrag(event);
             return;
@@ -159,14 +174,14 @@ export class IsometricRenderer {
         const intersects = this.raycaster.intersectObjects(this.scene.children, true);
 
         // Clear previous hover
-        if (this.hoveredObject && !this.isDragging) {
+        if (this.hoveredObject && !this.isDragging && !this.isPanning) {
             this.setObjectHighlight(this.hoveredObject, false);
             this.hoveredObject = null;
             this.container.style.cursor = 'default';
         }
 
         // Set new hover - prioritize components over containers
-        if (intersects.length > 0 && !this.isDragging) {
+        if (intersects.length > 0 && !this.isDragging && !this.isPanning) {
             const targetObject = this.findBestHoverTarget(intersects);
             if (targetObject) {
                 this.hoveredObject = targetObject;
@@ -176,7 +191,7 @@ export class IsometricRenderer {
                 // Show tooltip if available
                 this.showTooltip(targetObject, event);
             }
-        } else if (!this.isDragging) {
+        } else if (!this.isDragging && !this.isPanning) {
             this.hideTooltip();
         }
     }
@@ -228,8 +243,12 @@ export class IsometricRenderer {
             const targetObject = this.findBestHoverTarget(intersects);
             if (targetObject) {
                 this.startDrag(targetObject, intersects[0].point);
+                return;
             }
         }
+        
+        // If no object was clicked, start camera panning
+        this.startCameraPan(event);
     }
 
     /**
@@ -238,6 +257,8 @@ export class IsometricRenderer {
     onMouseUp(event) {
         if (this.isDragging) {
             this.endDrag();
+        } else if (this.isPanning) {
+            this.endCameraPan();
         }
     }
 
@@ -260,6 +281,29 @@ export class IsometricRenderer {
     }
 
     /**
+     * Handle keyboard shortcuts
+     */
+    onKeyDown(event) {
+        // Only handle if focus is not on an input element
+        if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') {
+            return;
+        }
+
+        switch (event.code) {
+            case 'KeyR':
+                if (event.ctrlKey || event.metaKey) {
+                    event.preventDefault();
+                    this.resetCamera();
+                }
+                break;
+            case 'Home':
+                event.preventDefault();
+                this.resetCamera();
+                break;
+        }
+    }
+
+    /**
      * Handle window resize
      */
     onWindowResize() {
@@ -273,6 +317,55 @@ export class IsometricRenderer {
         this.camera.updateProjectionMatrix();
 
         this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
+    }
+
+    /**
+     * Reset camera to default position and center on diagram
+     */
+    resetCamera() {
+        // Reset to default isometric position and orientation
+        this.camera.position.set(100, 100, 100);
+        this.camera.lookAt(0, 0, 0);
+        this.camera.zoom = 1;
+        this.camera.updateProjectionMatrix();
+    }
+
+    /**
+     * Center camera on the current diagram
+     */
+    centerCamera(layout) {
+        if (!layout) return;
+        
+        // Calculate diagram bounds
+        let minX = Infinity, maxX = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
+        
+        // Check component positions
+        for (const pos of Object.values(layout.components)) {
+            minX = Math.min(minX, pos.x);
+            maxX = Math.max(maxX, pos.x);
+            minZ = Math.min(minZ, pos.z);
+            maxZ = Math.max(maxZ, pos.z);
+        }
+        
+        // Check container positions
+        for (const pos of Object.values(layout.containers)) {
+            const size = pos.containerSize || { width: this.gridSize * 1.8, depth: this.gridSize * 1.2 };
+            minX = Math.min(minX, pos.x - size.width / 2);
+            maxX = Math.max(maxX, pos.x + size.width / 2);
+            minZ = Math.min(minZ, pos.z - size.depth / 2);
+            maxZ = Math.max(maxZ, pos.z + size.depth / 2);
+        }
+        
+        // Calculate center point
+        const centerX = (minX + maxX) / 2;
+        const centerZ = (minZ + maxZ) / 2;
+        
+        // Maintain isometric camera orientation while centering on diagram
+        // The camera should maintain its (1,1,1) direction but be positioned to look at the center
+        const offset = 100; // Distance from center
+        this.camera.position.set(centerX + offset, offset, centerZ + offset);
+        this.camera.lookAt(centerX, 0, centerZ);
     }
 
     /**
@@ -359,6 +452,67 @@ export class IsometricRenderer {
     endDrag() {
         this.isDragging = false;
         this.draggedObject = null;
+        this.container.style.cursor = 'default';
+    }
+
+    /**
+     * Start camera panning
+     */
+    startCameraPan(event) {
+        this.isPanning = true;
+        this.panStartMouse.set(event.clientX, event.clientY);
+        this.panStartCameraPosition.copy(this.camera.position);
+        this.container.style.cursor = 'move';
+        
+        // Clear any hover effects
+        if (this.hoveredObject) {
+            this.setObjectHighlight(this.hoveredObject, false);
+            this.hoveredObject = null;
+        }
+        this.hideTooltip();
+    }
+
+    /**
+     * Handle camera panning movement
+     */
+    handleCameraPan(event) {
+        if (!this.isPanning) return;
+
+        const currentMouse = new THREE.Vector2(event.clientX, event.clientY);
+        const delta = new THREE.Vector2().subVectors(currentMouse, this.panStartMouse);
+        
+        // Convert screen space movement to world space movement
+        // For orthographic camera, we need to account for the zoom and camera orientation
+        const panSpeed = 0.5;
+        
+        // Get the camera's right and up vectors in world space
+        const cameraMatrix = this.camera.matrixWorld.clone();
+        const right = new THREE.Vector3().setFromMatrixColumn(cameraMatrix, 0); // X axis
+        const up = new THREE.Vector3().setFromMatrixColumn(cameraMatrix, 1);    // Y axis
+        
+        // Normalize the vectors
+        right.normalize();
+        up.normalize();
+        
+        // Calculate movement in world space
+        const rightMovement = right.multiplyScalar(-delta.x * panSpeed / this.camera.zoom);
+        const upMovement = up.multiplyScalar(delta.y * panSpeed / this.camera.zoom);
+        
+        // Apply the movement to camera position
+        const newPosition = this.panStartCameraPosition.clone()
+            .add(rightMovement)
+            .add(upMovement);
+        
+        this.camera.position.copy(newPosition);
+        
+        // DO NOT call lookAt() - this preserves the camera's orientation
+    }
+
+    /**
+     * End camera panning
+     */
+    endCameraPan() {
+        this.isPanning = false;
         this.container.style.cursor = 'default';
     }
 
@@ -1288,33 +1442,6 @@ export class IsometricRenderer {
         sprite.scale.set(8, 8, 1);
 
         return sprite;
-    }
-
-    /**
-     * Center camera on diagram
-     */
-    centerCamera(layout) {
-        const positions = [
-            ...Object.values(layout.components),
-            ...Object.values(layout.containers)
-        ];
-
-        if (positions.length === 0) return;
-
-        const bounds = {
-            minX: Math.min(...positions.map(p => p.x)),
-            maxX: Math.max(...positions.map(p => p.x)),
-            minZ: Math.min(...positions.map(p => p.z)),
-            maxZ: Math.max(...positions.map(p => p.z))
-        };
-
-        const centerX = (bounds.minX + bounds.maxX) / 2;
-        const centerZ = (bounds.minZ + bounds.maxZ) / 2;
-
-        // Update camera position to center on diagram
-        const offset = 100;
-        this.camera.position.set(centerX + offset, offset, centerZ + offset);
-        this.camera.lookAt(centerX, 0, centerZ);
     }
 
     /**
