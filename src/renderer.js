@@ -421,21 +421,24 @@ export class IsometricRenderer {
                         const containerBounds = this.getContainerBounds(parentMesh);
                         const margin = 15; // Small margin inside container
                         
-                        // Check if the proposed position would be outside the container
-                        const wouldExitContainer = 
-                            intersectionPoint.x < containerBounds.minX + margin ||
-                            intersectionPoint.x > containerBounds.maxX - margin ||
-                            intersectionPoint.z < containerBounds.minZ + margin ||
-                            intersectionPoint.z > containerBounds.maxZ - margin;
+                        // IMMEDIATELY constrain the position to container bounds
+                        // Never allow the component to be positioned outside its container
+                        const constrainedPosition = intersectionPoint.clone();
+                        constrainedPosition.x = Math.max(containerBounds.minX + margin, 
+                                                       Math.min(containerBounds.maxX - margin, constrainedPosition.x));
+                        constrainedPosition.z = Math.max(containerBounds.minZ + margin, 
+                                                       Math.min(containerBounds.maxZ - margin, constrainedPosition.z));
                         
-                        if (wouldExitContainer) {
-                            // Component is trying to leave its container - force drag end and snap back
-                            this.forceEndDragAndSnapBack();
-                            return; // Exit early, don't process the movement
+                        // Check if we had to constrain the position (for visual feedback)
+                        const wasConstrained = !constrainedPosition.equals(intersectionPoint);
+                        
+                        // Apply the constrained position - component can never leave its container
+                        this.draggedObject.position.copy(constrainedPosition);
+                        
+                        // Show visual feedback if movement was constrained
+                        if (wasConstrained) {
+                            this.showBoundaryConstraintFeedback(parentMesh);
                         }
-                        
-                        // Position is valid within container, proceed with movement
-                        this.draggedObject.position.copy(intersectionPoint);
                     }
                 } else {
                     // Component not in a container, check if it's trying to enter one
@@ -466,41 +469,6 @@ export class IsometricRenderer {
             // Update all connections that involve this object and its children
             this.updateConnectionsForMovedObject(this.draggedObject.userData.id);
         }
-    }
-
-    /**
-     * Force end drag and snap component back to valid position within its container
-     */
-    forceEndDragAndSnapBack() {
-        if (!this.draggedObject || this.draggedObject.userData.type !== 'component') return;
-        
-        const componentData = this.getObjectData(this.draggedObject.userData.id);
-        
-        if (componentData && componentData.parent) {
-            const parentMesh = this.meshes.get(componentData.parent);
-            
-            if (parentMesh) {
-                // Calculate valid position within container bounds
-                const containerBounds = this.getContainerBounds(parentMesh);
-                const margin = 15;
-                
-                // Constrain the current position to be within bounds
-                const constrainedPosition = this.draggedObject.position.clone();
-                constrainedPosition.x = Math.max(containerBounds.minX + margin, 
-                                               Math.min(containerBounds.maxX - margin, constrainedPosition.x));
-                constrainedPosition.z = Math.max(containerBounds.minZ + margin, 
-                                               Math.min(containerBounds.maxZ - margin, constrainedPosition.z));
-                
-                // Snap back to valid position
-                this.draggedObject.position.copy(constrainedPosition);
-                
-                // Show visual feedback
-                this.showBoundaryConstraintFeedback(parentMesh);
-            }
-        }
-        
-        // Force end the drag operation
-        this.endDrag();
     }
 
     /**
